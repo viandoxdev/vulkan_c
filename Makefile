@@ -2,8 +2,17 @@ Q=@
 CC=gcc
 
 GCCCFLAGS=-Wno-format-truncation 
-CFLAGS=-std=c11 -pedantic -g -Wall
-LDFLAGS=-lm
+CFLAGS=-std=c2x -pedantic -g -Wall
+LDFLAGS=-lm -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi
+
+# disable logging
+# CFLAGS+=-DLOG_DISABLE
+
+# flush logs
+# CFLAGS+=-DLOG_FLUSH
+
+# enable validation layers
+CFLAGS+=-DENABLE_VALIDATION_LAYERS
 
 BUILD_DIR=./objects
 BIN=ast
@@ -22,6 +31,7 @@ endif
 run: $(BIN)
 	@echo "RUN   $(BIN) $(RUNARGS)"
 	$(Q) chmod +x $(BIN)
+	@echo
 	$(Q) ./$(BIN) $(RUNARGS)
 
 $(BIN): $(OBJECTS)
