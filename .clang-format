@@ -1,0 +1,9 @@
+# vi:ft=yaml
+BasedOnStyle: LLVM
+IndentWidth: 4
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+AlignArrayOfStructures: Left
+PointerAlignment: Right
+ColumnLimit: 130
+IncludeBlocks: Regroup
