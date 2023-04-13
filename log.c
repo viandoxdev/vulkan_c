@@ -26,6 +26,9 @@ void logger_set_severities(Severities sevs) { LOGGER.sevs = sevs; }
 
 void logger_init() { LOGGER.initialized = true; }
 
+// Logging function, should be rarely called by itself (use the log_* macros instead)
+// message takes the form: (file:line?) SEVERITY func > fmt ...
+// line can be ignored if negative
 void _log_severity(LogSeverity sev, const char *func, const char *file, const int line, char *fmt, ...) {
     if (!LOGGER.initialized) {
         printf("Trying to log, but the logger hasn't been initialized.\n");
@@ -38,7 +41,12 @@ void _log_severity(LogSeverity sev, const char *func, const char *file, const in
     }
 
     // format source in second half of buffer
-    int source_len = snprintf(SOURCE_BUFFER, SOURCE_BUFFER_SIZE, "(%s:%d)", file, line);
+    int source_len;
+    if(line >= 0) {
+        source_len = snprintf(SOURCE_BUFFER, SOURCE_BUFFER_SIZE, "(%s:%d)", file, line);
+    } else {
+        source_len = snprintf(SOURCE_BUFFER, SOURCE_BUFFER_SIZE, "(%s)", file);
+    }
 
     // Keep track of width for alignment
     if (source_len > LOGGER.source_width) {

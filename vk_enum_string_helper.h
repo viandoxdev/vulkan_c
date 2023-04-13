@@ -108,4 +108,109 @@ static inline const char* string_VkResult(VkResult input_value)
     }
 }
 
+static inline const char* string_VkObjectType(VkObjectType input_value)
+{
+    switch (input_value)
+    {
+        case VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR:
+            return "acceleration_structure";
+        case VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_NV:
+            return "acceleration_structure";
+        case VK_OBJECT_TYPE_BUFFER:
+            return "buffer";
+        case VK_OBJECT_TYPE_BUFFER_COLLECTION_FUCHSIA:
+            return "buffer_collection";
+        case VK_OBJECT_TYPE_BUFFER_VIEW:
+            return "buffer_view";
+        case VK_OBJECT_TYPE_COMMAND_BUFFER:
+            return "command_buffer";
+        case VK_OBJECT_TYPE_COMMAND_POOL:
+            return "command_pool";
+        case VK_OBJECT_TYPE_CU_FUNCTION_NVX:
+            return "cu_function";
+        case VK_OBJECT_TYPE_CU_MODULE_NVX:
+            return "cu_module";
+        case VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT:
+            return "debug_report_callback";
+        case VK_OBJECT_TYPE_DEBUG_UTILS_MESSENGER_EXT:
+            return "debug_utils_messenger";
+        case VK_OBJECT_TYPE_DEFERRED_OPERATION_KHR:
+            return "deferred_operation";
+        case VK_OBJECT_TYPE_DESCRIPTOR_POOL:
+            return "descriptor_pool";
+        case VK_OBJECT_TYPE_DESCRIPTOR_SET:
+            return "descriptor_set";
+        case VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT:
+            return "descriptor_set_layout";
+        case VK_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE:
+            return "descriptor_update_template";
+        case VK_OBJECT_TYPE_DEVICE:
+            return "device";
+        case VK_OBJECT_TYPE_DEVICE_MEMORY:
+            return "device_memory";
+        case VK_OBJECT_TYPE_DISPLAY_KHR:
+            return "display";
+        case VK_OBJECT_TYPE_DISPLAY_MODE_KHR:
+            return "display_mode";
+        case VK_OBJECT_TYPE_EVENT:
+            return "event";
+        case VK_OBJECT_TYPE_FENCE:
+            return "fence";
+        case VK_OBJECT_TYPE_FRAMEBUFFER:
+            return "framebuffer";
+        case VK_OBJECT_TYPE_IMAGE:
+            return "image";
+        case VK_OBJECT_TYPE_IMAGE_VIEW:
+            return "image_view";
+        case VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_NV:
+            return "indirect_commands_layout";
+        case VK_OBJECT_TYPE_INSTANCE:
+            return "instance";
+        case VK_OBJECT_TYPE_MICROMAP_EXT:
+            return "micromap";
+        case VK_OBJECT_TYPE_OPTICAL_FLOW_SESSION_NV:
+            return "optical_flow_session";
+        case VK_OBJECT_TYPE_PERFORMANCE_CONFIGURATION_INTEL:
+            return "performance_configuration_intel";
+        case VK_OBJECT_TYPE_PHYSICAL_DEVICE:
+            return "physical_device";
+        case VK_OBJECT_TYPE_PIPELINE:
+            return "pipeline";
+        case VK_OBJECT_TYPE_PIPELINE_CACHE:
+            return "pipeline_cache";
+        case VK_OBJECT_TYPE_PIPELINE_LAYOUT:
+            return "pipeline_layout";
+        case VK_OBJECT_TYPE_PRIVATE_DATA_SLOT:
+            return "private_data_slot";
+        case VK_OBJECT_TYPE_QUERY_POOL:
+            return "query_pool";
+        case VK_OBJECT_TYPE_QUEUE:
+            return "queue";
+        case VK_OBJECT_TYPE_RENDER_PASS:
+            return "render_pass";
+        case VK_OBJECT_TYPE_SAMPLER:
+            return "sampler";
+        case VK_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION:
+            return "sampler_ycbcr_conversion";
+        case VK_OBJECT_TYPE_SEMAPHORE:
+            return "semaphore";
+        case VK_OBJECT_TYPE_SHADER_MODULE:
+            return "shader_module";
+        case VK_OBJECT_TYPE_SURFACE_KHR:
+            return "surface";
+        case VK_OBJECT_TYPE_SWAPCHAIN_KHR:
+            return "swapchain";
+        case VK_OBJECT_TYPE_UNKNOWN:
+            return "unknown";
+        case VK_OBJECT_TYPE_VALIDATION_CACHE_EXT:
+            return "validation_cache";
+        case VK_OBJECT_TYPE_VIDEO_SESSION_KHR:
+            return "video_session";
+        case VK_OBJECT_TYPE_VIDEO_SESSION_PARAMETERS_KHR:
+            return "video_session_parameters";
+        default:
+            return "Unhandled VkObjectType";
+    }
+}
+
 #endif
