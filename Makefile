@@ -1,7 +1,7 @@
 Q=@
 CC=gcc
 
-GCCCFLAGS=-Wno-format-truncation 
+GCCCFLAGS=-Wno-format-truncation -fsanitize=address
 CFLAGS=-std=c2x -pedantic -g -Wall
 LDFLAGS=-lm -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi
 
