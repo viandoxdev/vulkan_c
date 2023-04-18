@@ -1,9 +1,19 @@
 #define GLFW_INCLUDE_VULKAN
+// List of vector implementions: (qualifier is used in functions name, but shouldn't
+// be used in user code)
+//  (contained type, vector type, qualifier)
+#define VECTOR_IMPL_LIST \
+    (const char *, ConstStringVec, const_string), (VkImage, VkImageVec, vk_image), \
+        (VkExtensionProperties, VkExtensionPropertiesVec, vk_extension_properties), \
+        (VkLayerProperties, VkLayerPropertiesVec, vk_layer_properties), \
+        (VkPhysicalDevice, VkPhysicalDeviceVec, vk_physical_device)
+#include "assert.h"
 #include "log.h"
 #include "proxies.h"
 #include "vk_enum_string_helper.h"
 
 #include <GLFW/glfw3.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,46 +21,32 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 
-// Basic assertion macro (always checks)
-#ifdef LOG_DISABLE
-#define assert(c, fmt, ...)                                                                                                      \
-    do {                                                                                                                         \
-        if (!(c)) {                                                                                                              \
-            printf(fmt "\n", __VA_ARGS__);                                                                                       \
-            exit(1);                                                                                                             \
-        }                                                                                                                        \
-    } while (false)
-#else // LOG_DISABLE
-#define assert(c, ...)                                                                                                           \
-    do {                                                                                                                         \
-        if (!(c)) {                                                                                                              \
-            log_error(__VA_ARGS__);                                                                                              \
-            exit(1);                                                                                                             \
-        }                                                                                                                        \
-    } while (false)
-#endif // LOG_DISABLE
-
-// Only check if NDEBUG isn't defined
-#ifdef NDEBUG
-#define debug_assert(c, ...) (void)0
-#else
-#define debug_assert(c, ...) assert(c, __VA_ARGS__)
-#endif
-
-#define assert_eq(a, b, ...) assert(a == b, __VA_ARGS__)
-
-// Assert allocation succeeded (var != NULL)
-#define assert_alloc(var) debug_assert(var != NULL, "Failed to allocate memory for " #var " (Out of memory ?)")
+// vector.h must be included last (or actually after vulkan.h), since it references some
+// included types in the implemention of the vectors it generates
+// clang-format off
+#include "vector.h"
+// clang-format on
 
 // run expr, and assert that the returned VkResult is VK_SUCCESS
-#define vk_try(expr, str)                                                                                                        \
-    do {                                                                                                                         \
-        VkResult _res = expr;                                                                                                    \
-        assert_eq(_res, VK_SUCCESS, str " (%s)", string_VkResult(_res));                                                         \
+#define vk_try(expr, fmt, ...) \
+    do { \
+        VkResult _res = expr; \
+        assert_eq(_res, VK_SUCCESS, fmt " (%s)", __VA_ARGS__ __VA_OPT__(, ) string_VkResult(_res)); \
+    } while (false)
+#define vk_get_vec(vec, expr) \
+    do { \
+        uint32_t _count; \
+        uint32_t *count = &_count; \
+        void *ptr = NULL; \
+        expr; \
+        *(vec) = (typeof(*(vec)))vec_init(); \
+        vec_grow(vec, _count); \
+        ptr = (vec)->data; \
+        expr; \
+        (vec)->len = _count; \
     } while (false)
 
 // Structs
-
 typedef struct {
     GLFWwindow *win;
 } Window;
@@ -71,6 +67,15 @@ typedef struct {
 } SwapChainSupportDetails;
 
 typedef struct {
+    VkSurfaceFormatKHR format;
+    VkPresentModeKHR present_mode;
+    VkExtent2D extent;
+    uint32_t image_count;
+    VkBool32 composite_alpha;
+    VkSurfaceTransformFlagBitsKHR transform;
+} SwapChainConfig;
+
+typedef struct {
     VkInstance instance;
     // Debug messenger used to route vulkan messages through the logger
     VkDebugUtilsMessengerEXT debug_messenger;
@@ -79,7 +84,11 @@ typedef struct {
     VkPhysicalDevice physical_device;
     QueueFamilyIndices queue_family_indices;
     SwapChainSupportDetails swapchain_support;
+
     VkDevice device;
+    SwapChainConfig config;
+    VkSwapchainKHR swapchain;
+    VkImageVec images;
 
     VkQueue graphics_queue;
     VkQueue present_queue;
@@ -95,6 +104,15 @@ static const uint32_t REQUIRED_EXTENSIONS_COUNT = sizeof(REQUIRED_EXTENSIONS) / 
 
 static const char *REQUIRED_DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 static const uint32_t REQUIRED_DEVICE_EXTENSIONS_COUNT = sizeof(REQUIRED_DEVICE_EXTENSIONS) / sizeof(char *);
+
+__attribute__((aligned(4))) static const uint8_t VERTEX_SHADER[] = {
+#include "include/shader.vert.spv.bytes"
+};
+static const size_t VERTEX_SHADER_LEN = sizeof(VERTEX_SHADER) / sizeof(uint8_t);
+__attribute__((aligned(4))) static const uint8_t FRAGMENT_SHADER[] = {
+#include "include/shader.frag.spv.bytes"
+};
+static const size_t FRAGMENT_SHADER_LEN = sizeof(FRAGMENT_SHADER) / sizeof(uint8_t);
 
 SwapChainSupportDetails swapchain_support_details_init(VkPhysicalDevice dev, VkSurfaceKHR surface) {
     SwapChainSupportDetails details = {0};
@@ -150,6 +168,14 @@ QueueFamilyIndices queue_family_indices_init(VkPhysicalDevice dev, VkSurfaceKHR 
 }
 
 bool queue_family_indices_complete(QueueFamilyIndices *idx) { return idx->present >= 0 && idx->graphics >= 0; }
+
+VkResult create_shader_module(VkDevice dev, const uint32_t *data, size_t len, VkShaderModule *module) {
+    VkShaderModuleCreateInfo create_info = {0};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = len;
+    create_info.pCode = data;
+    return vkCreateShaderModule(dev, &create_info, NULL, module);
+}
 
 // Debug callback
 static VKAPI_ATTR VkBool32 VKAPI_CALL validation_layers_debug_callback(
@@ -214,53 +240,132 @@ static inline VkDebugUtilsMessengerCreateInfoEXT debug_messenger_create_info() {
     return create_info;
 }
 
+// Configure swapchain according to what it supports and the window
+static inline SwapChainConfig configure_swapchain(SwapChainSupportDetails *details, Window *win) {
+    SwapChainConfig cfg;
+
+    // Format
+    // Default to the first one
+    cfg.format = details->formats[0];
+    // Prefer BGRA8 SRGB if available
+    for (uint32_t i = 0; i < details->formats_count; i++) {
+        VkSurfaceFormatKHR format = details->formats[i];
+        if (format.format == VK_FORMAT_B8G8R8A8_SRGB && format.colorSpace == VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
+            cfg.format = format;
+        }
+    }
+
+    // Present mode
+    // Default to FIFO (always available)
+    cfg.present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    // Prefer mailbox if possible
+    for (uint32_t i = 0; i < details->present_modes_count; i++) {
+        VkPresentModeKHR mode = details->present_modes[i];
+        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+            cfg.present_mode = mode;
+        }
+    }
+
+    // Extent
+    if (details->capabilities.currentExtent.width != UINT32_MAX) {
+        cfg.extent = details->capabilities.currentExtent;
+    } else {
+        int w, h;
+        glfwGetFramebufferSize(win->win, &w, &h);
+
+        VkSurfaceCapabilitiesKHR *cap = &details->capabilities;
+
+        cfg.extent.width = w < cap->minImageExtent.width   ? cap->minImageExtent.width
+                           : w > cap->maxImageExtent.width ? cap->maxImageExtent.width
+                                                           : w;
+        cfg.extent.height = h < cap->minImageExtent.height   ? cap->minImageExtent.height
+                            : h > cap->maxImageExtent.height ? cap->maxImageExtent.height
+                                                             : w;
+    }
+
+    // Image count
+    cfg.image_count = details->capabilities.minImageCount + 1;
+    if (details->capabilities.maxImageCount > 0 && cfg.image_count > details->capabilities.maxImageCount) {
+        cfg.image_count = details->capabilities.maxImageCount;
+    }
+
+    // Alpha
+    cfg.composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (details->capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) {
+        cfg.composite_alpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    }
+
+    cfg.transform = details->capabilities.currentTransform;
+
+    return cfg;
+}
+
+static inline VkResult create_swapchain(
+    VkDevice dev,
+    SwapChainConfig *cfg,
+    VkSurfaceKHR surface,
+    QueueFamilyIndices *idx,
+    VkSwapchainKHR previous,
+    VkSwapchainKHR *new
+) {
+    VkSwapchainCreateInfoKHR create_info = {0};
+    create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    create_info.surface = surface;
+    create_info.minImageCount = cfg->image_count;
+    create_info.imageFormat = cfg->format.format;
+    create_info.imageColorSpace = cfg->format.colorSpace;
+    create_info.imageExtent = cfg->extent;
+    create_info.imageArrayLayers = 1;
+    create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    create_info.preTransform = cfg->transform;
+    // TODO: check that
+    create_info.compositeAlpha = cfg->composite_alpha;
+    create_info.presentMode = cfg->present_mode;
+    create_info.clipped = VK_TRUE;
+    create_info.oldSwapchain = previous;
+
+    uint32_t queue_family_indices[2] = {idx->graphics, idx->present};
+    if (idx->graphics != idx->present) {
+        create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        create_info.queueFamilyIndexCount = 2;
+        create_info.pQueueFamilyIndices = queue_family_indices;
+    } else {
+        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+
+    return vkCreateSwapchainKHR(dev, &create_info, NULL, new);
+}
+
 GraphicContext ctx_init(const char *app_name, Window *win) {
     GraphicContext res = {0};
 
-    uint32_t required_exts_count;
-    const char **required_exts;
-    uint32_t enabled_layers_count = 0;
-    const char **enabled_layers;
+    ConstStringVec required_exts = vec_init();
+    ConstStringVec enabled_layers = vec_init();
 
     // Required extensions
     {
         uint32_t glfw_ext_count;
         const char **glfw_exts = glfwGetRequiredInstanceExtensions(&glfw_ext_count);
 
-        required_exts_count = glfw_ext_count + REQUIRED_EXTENSIONS_COUNT;
-        required_exts = malloc(required_exts_count * sizeof(char *));
+        vec_grow(&required_exts, glfw_ext_count + REQUIRED_EXTENSIONS_COUNT);
 
-        assert_alloc(required_exts);
-
-        for (uint32_t i = 0; i < glfw_ext_count; i++) {
-            required_exts[i] = glfw_exts[i];
-        }
-        for (uint32_t i = 0; i < REQUIRED_EXTENSIONS_COUNT; i++) {
-            required_exts[i + glfw_ext_count] = REQUIRED_EXTENSIONS[i];
-        }
+        vec_push_array(&required_exts, glfw_exts, glfw_ext_count);
+        vec_push_array(&required_exts, REQUIRED_EXTENSIONS, REQUIRED_EXTENSIONS_COUNT);
     }
 
     // Validation layers
 #ifdef ENABLE_VALIDATION_LAYERS
     {
-        uint32_t supported_layers_count;
-        VkLayerProperties *supported_layers;
+        VkLayerPropertiesVec supported_layers;
+        vk_get_vec(&supported_layers, vkEnumerateInstanceLayerProperties(count, ptr));
 
-        vkEnumerateInstanceLayerProperties(&supported_layers_count, NULL);
-
-        supported_layers = malloc(supported_layers_count * sizeof(VkLayerProperties));
-        enabled_layers = malloc(VALIDATION_LAYER_COUNT * sizeof(char *));
-
-        assert_alloc(supported_layers);
-        assert_alloc(enabled_layers);
-
-        vkEnumerateInstanceLayerProperties(&supported_layers_count, supported_layers);
+        vec_grow(&enabled_layers, supported_layers.len);
 
         for (uint32_t i = 0; i < VALIDATION_LAYER_COUNT; i++) {
             const char *layer_name = VALIDATION_LAYERS[i];
             bool found = false;
-            for (uint32_t j = 0; j < supported_layers_count; j++) {
-                if (strcmp(layer_name, supported_layers[j].layerName) == 0) {
+            for (uint32_t j = 0; j < supported_layers.len; j++) {
+                if (strcmp(layer_name, supported_layers.data[j].layerName) == 0) {
                     found = true;
                     break;
                 }
@@ -269,11 +374,11 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
             if (!found) {
                 log_warn("Validation layer '%s' requested, but not available", layer_name);
             } else {
-                enabled_layers[enabled_layers_count++] = layer_name;
+                vec_push(&enabled_layers, (char *)layer_name);
             }
         }
 
-        free(supported_layers);
+        vec_drop(supported_layers);
     }
 #endif // ENABLE_VALIDATION_LAYERS
 
@@ -287,24 +392,18 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         appinfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
         appinfo.apiVersion = VK_API_VERSION_1_0;
 
-        // Log the supported extensions
+        // Log the supported ext ensions
 #ifndef LOG_DISABLE
         {
-            uint32_t supported_exts_count;
-            VkExtensionProperties *supported_exts;
-
-            vkEnumerateInstanceExtensionProperties(NULL, &supported_exts_count, NULL);
-            supported_exts = malloc(supported_exts_count * sizeof(VkExtensionProperties));
-            assert_alloc(supported_exts);
-
-            vkEnumerateInstanceExtensionProperties(NULL, &supported_exts_count, supported_exts);
+            VkExtensionPropertiesVec supported_exts;
+            vk_get_vec(&supported_exts, vkEnumerateInstanceExtensionProperties(NULL, count, ptr));
 
             log_info("Availables vulkan extensions:");
-            for (uint32_t i = 0; i < supported_exts_count; i++) {
-                log_info("    %s", supported_exts[i].extensionName);
+            for (uint32_t i = 0; i < supported_exts.len; i++) {
+                log_info("    %s", supported_exts.data[i].extensionName);
             }
 
-            free(supported_exts);
+            vec_drop(supported_exts);
         }
 #endif // LOG_DISABLE
 
@@ -313,16 +412,16 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         VkInstanceCreateInfo create_info = {0};
         create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.pApplicationInfo = &appinfo;
-        create_info.enabledExtensionCount = required_exts_count;
-        create_info.ppEnabledExtensionNames = required_exts;
+        create_info.enabledExtensionCount = required_exts.len;
+        create_info.ppEnabledExtensionNames = required_exts.data;
         create_info.pNext = &debug_create_info;
 
 #ifdef ENABLE_VALIDATION_LAYERS
-        create_info.enabledLayerCount = enabled_layers_count;
-        create_info.ppEnabledLayerNames = enabled_layers;
+        create_info.enabledLayerCount = enabled_layers.len;
+        create_info.ppEnabledLayerNames = enabled_layers.data;
         log_info("Enabled validation layers:");
-        for (uint32_t i = 0; i < enabled_layers_count; i++) {
-            log_info("    %s", enabled_layers[i]);
+        for (uint32_t i = 0; i < enabled_layers.len; i++) {
+            log_info("    %s", enabled_layers.data[i]);
         }
 #else
         create_info.enabledLayerCount = 0;
@@ -331,8 +430,8 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         vk_try(vkCreateInstance(&create_info, NULL, &res.instance), "Failed to create vulkan instance");
 
         log_info("Enabled vulkan extensions:");
-        for (uint32_t i = 0; i < required_exts_count; i++) {
-            log_info("    %s", required_exts[i]);
+        for (uint32_t i = 0; i < required_exts.len; i++) {
+            log_info("    %s", required_exts.data[i]);
         }
     }
 
@@ -352,36 +451,44 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     {
         res.physical_device = VK_NULL_HANDLE;
 
-        uint32_t device_count = 0;
-        vkEnumeratePhysicalDevices(res.instance, &device_count, NULL);
+        VkPhysicalDeviceVec devices;
+        vk_get_vec(&devices, vkEnumeratePhysicalDevices(res.instance, count, ptr));
 
-        if (device_count == 0) {
+        if (devices.len == 0) {
             log_error("No vulkan device found.");
             exit(1);
         }
 
-        VkPhysicalDevice *devices = malloc(device_count * sizeof(VkPhysicalDevice *));
-        assert_alloc(devices);
-        vkEnumeratePhysicalDevices(res.instance, &device_count, devices);
+        char preferred_device_name[256] = {0};
+        {
+            FILE *override_file = fopen("preferred_device", "r");
+            if (override_file != NULL) {
+                uint32_t len = fread(preferred_device_name, 1, 255, override_file);
+
+                // Strip ending newline if present
+                if (preferred_device_name[len - 1] == '\n') {
+                    preferred_device_name[len - 1] = '\0';
+                }
+
+                log_info("Preferred device: '%s'", preferred_device_name);
+                fclose(override_file);
+            }
+        }
 
         int32_t max_score = -1;
         VkPhysicalDeviceProperties final_device_props;
         log_info("Suitable vulkan devices:");
-        for (uint32_t i = 0; i < device_count; i++) {
-            VkPhysicalDevice dev = devices[i];
+        for (uint32_t i = 0; i < devices.len; i++) {
+            VkPhysicalDevice dev = devices.data[i];
             VkPhysicalDeviceProperties props;
             VkPhysicalDeviceFeatures feats;
             QueueFamilyIndices idx;
-            uint32_t device_extensions_count = 0;
-            VkExtensionProperties *device_extensions = NULL;
+            VkExtensionPropertiesVec device_extensions;
 
             idx = queue_family_indices_init(dev, res.surface);
             vkGetPhysicalDeviceProperties(dev, &props);
             vkGetPhysicalDeviceFeatures(dev, &feats);
-            vkEnumerateDeviceExtensionProperties(dev, NULL, &device_extensions_count, NULL);
-            device_extensions = malloc(device_extensions_count * sizeof(VkExtensionProperties));
-            assert_alloc(device_extensions);
-            vkEnumerateDeviceExtensionProperties(dev, NULL, &device_extensions_count, device_extensions);
+            vk_get_vec(&device_extensions, vkEnumerateDeviceExtensionProperties(dev, NULL, count, ptr));
 
             // Conditions preventing this device from being choosen altogether
             {
@@ -395,8 +502,8 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
                 for (int i = 0; i < REQUIRED_DEVICE_EXTENSIONS_COUNT; i++) {
                     const char *ext = REQUIRED_DEVICE_EXTENSIONS[i];
                     bool found = false;
-                    for (int j = 0; j < device_extensions_count; j++) {
-                        if (strcmp(ext, device_extensions[j].extensionName) == 0) {
+                    for (int j = 0; j < device_extensions.len; j++) {
+                        if (strcmp(ext, device_extensions.data[j].extensionName) == 0) {
                             found = true;
                             break;
                         }
@@ -437,14 +544,16 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
                     break;
                 }
 
-                // For some reasons my nvdia gpu doesn't work (crashes, somthing about an invalid surface, probably nvidia linux drivers being faulty).
-                // TODO: remove this, and add a way to override device selection with some kind of config file (instead of hardcoding it).
-                if (strstr(props.deviceName, "NVIDIA")) {
-                    score -= 6;
+                if (strstr(props.deviceName, preferred_device_name)) {
+                    score = 9999;
                 }
             }
 
-            log_info("    '%s' (score: %d)", props.deviceName, score);
+            if (score >= 9999) {
+                log_info("    '%s' (score: %d, preferred)", props.deviceName, score);
+            } else {
+                log_info("    '%s' (score: %d)", props.deviceName, score);
+            }
 
             if (score > max_score) {
                 max_score = score;
@@ -454,10 +563,10 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
             }
 
         skip_device:
-            free(device_extensions);
+            vec_drop(device_extensions);
         }
 
-        free(devices);
+        vec_drop(devices);
 
         if (res.physical_device == VK_NULL_HANDLE) {
             log_error("Couldn't find suitable vulkan device.");
@@ -508,8 +617,8 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         create_info.enabledExtensionCount = REQUIRED_DEVICE_EXTENSIONS_COUNT;
         create_info.ppEnabledExtensionNames = REQUIRED_DEVICE_EXTENSIONS;
 #ifdef ENABLE_VALIDATION_LAYERS
-        create_info.enabledLayerCount = enabled_layers_count;
-        create_info.ppEnabledLayerNames = enabled_layers;
+        create_info.enabledLayerCount = enabled_layers.len;
+        create_info.ppEnabledLayerNames = enabled_layers.data;
 #else
         create_info.enabledLayerCount = 0;
 #endif
@@ -520,18 +629,63 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         vkGetDeviceQueue(res.device, res.queue_family_indices.present, 0, &res.present_queue);
     }
 
-    free(required_exts);
-    free(enabled_layers);
+    // Swapchain
+    {
+        res.config = configure_swapchain(&res.swapchain_support, win);
+        vk_try(
+            create_swapchain(res.device, &res.config, res.surface, &res.queue_family_indices, VK_NULL_HANDLE, &res.swapchain),
+            "Failed to create swapchain"
+        );
+
+        vk_get_vec(&res.images, vkGetSwapchainImagesKHR(res.device, res.swapchain, count, ptr));
+    }
+
+    // Graphic pipeline
+    {
+        VkShaderModule vertex_shader;
+        VkShaderModule fragment_shader;
+
+        vk_try(
+            create_shader_module(res.device, (const uint32_t *)VERTEX_SHADER, VERTEX_SHADER_LEN, &vertex_shader),
+            "Failed to create vertex shader module"
+        );
+        vk_try(
+            create_shader_module(res.device, (const uint32_t *)FRAGMENT_SHADER, FRAGMENT_SHADER_LEN, &vertex_shader),
+            "Failed to create fragment shader module"
+        );
+
+        VkPipelineShaderStageCreateInfo vertex_shader_stage_create_info = {0};
+        vertex_shader_stage_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertex_shader_stage_create_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertex_shader_stage_create_info.module = vertex_shader;
+        vertex_shader_stage_create_info.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragment_shader_stage_create_info = {0};
+        fragment_shader_stage_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragment_shader_stage_create_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragment_shader_stage_create_info.module = fragment_shader;
+        fragment_shader_stage_create_info.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shader_stages[2] = {vertex_shader_stage_create_info, fragment_shader_stage_create_info};
+
+        vkDestroyShaderModule(res.device, fragment_shader, NULL);
+        vkDestroyShaderModule(res.device, vertex_shader, NULL);
+    }
+
+    vec_drop(required_exts);
+    vec_drop(enabled_layers);
 
     return res;
 }
 
 void ctx_drop(GraphicContext ctx) {
+    vkDestroySwapchainKHR(ctx.device, ctx.swapchain, NULL);
     swapchain_support_details_drop(ctx.swapchain_support);
     vkDestroyDevice(ctx.device, NULL);
     vkDestroySurfaceKHR(ctx.instance, ctx.surface, NULL);
     DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debug_messenger, NULL);
     vkDestroyInstance(ctx.instance, NULL);
+    vec_drop(ctx.images);
 }
 
 Window window_init(const char *title, uint32_t width, uint32_t height) {
@@ -577,4 +731,6 @@ int main() {
 
     ctx_drop(ctx);
     window_drop(win);
+
+    log_info("VERT: \n%s", VERT);
 }

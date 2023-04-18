@@ -1,3 +1,6 @@
 .ccls-cache
 objects
+include
 ast
+compile_commands.json
+preferred_device

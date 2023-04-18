@@ -5,17 +5,20 @@
 #include <stdint.h>
 #include <stdio.h>
 
-typedef uint32_t Severities;
+// Bit field of severities
+typedef uint32_t LogSeverities;
 
+// The logger
 typedef struct {
     bool       initialized;
     FILE      *fd;
-    Severities sevs;
+    LogSeverities sevs;
     int        source_width;
     int        func_width;
 } Logger;
 
-typedef enum {
+// A message's severity Error > Warning > Info > Debug > Trace
+typedef enum: LogSeverities {
     Trace   = 1 << 0,
     Debug   = 1 << 1,
     Info    = 1 << 2,
@@ -28,9 +31,9 @@ void _log_severity(LogSeverity sev, const char *func, const char *file, const in
 
 // Set the file desciptor for the logger
 void logger_set_fd(FILE *fd);
-void logger_enable_severities(Severities sevs);
-void logger_disable_severities(Severities sevs);
-void logger_set_severities(Severities sevs);
+void logger_enable_severities(LogSeverities sevs);
+void logger_disable_severities(LogSeverities sevs);
+void logger_set_severities(LogSeverities sevs);
 void logger_init();
 
 #ifdef LOG_DISABLE

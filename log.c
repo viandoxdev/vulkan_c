@@ -18,11 +18,11 @@ static Logger LOGGER = {.sevs = Info | Warning | Error};
 
 void logger_set_fd(FILE *fd) { LOGGER.fd = fd; }
 
-void logger_enable_severities(Severities sevs) { LOGGER.sevs |= sevs; }
+void logger_enable_severities(LogSeverities sevs) { LOGGER.sevs |= sevs; }
 
-void logger_disable_severities(Severities sevs) { LOGGER.sevs &= ~sevs; }
+void logger_disable_severities(LogSeverities sevs) { LOGGER.sevs &= ~sevs; }
 
-void logger_set_severities(Severities sevs) { LOGGER.sevs = sevs; }
+void logger_set_severities(LogSeverities sevs) { LOGGER.sevs = sevs; }
 
 void logger_init() { LOGGER.initialized = true; }
 
