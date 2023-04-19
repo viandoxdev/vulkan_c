@@ -1,4 +1,9 @@
 Q=
+
+NQ=
+ifeq ($(Q),@)
+	NQ:=true
+endif
 CC=gcc
 GLSLC=glslc
 
@@ -37,9 +42,9 @@ endif
 
 .PHONY: run
 run: $(BIN)
-	@echo "RUN   $(BIN) $(RUNARGS)"
+	$(if $(NQ), @echo "RUN   $(BIN) $(RUNARGS)")
 	$(Q) chmod +x $(BIN)
-	@echo
+	$(if $(NQ), @$(NQ) && echo)
 	$(Q) ./$(BIN) $(RUNARGS)
 .PHONY: build
 build: $(BIN)
@@ -49,7 +54,7 @@ asm: $(INCLUDES) $(ASM)
 expand: $(INCLUDES) $(EXPANDED)
 
 $(BIN): $(INCLUDES) $(OBJECTS)
-	@echo "LD    $@"
+	$(if $(NQ), @echo "LD  $@ $(RUNARGS)")
 	$(Q) $(CC) $(CFLAGS) $(OBJECTS) $(LDFLAGS) -o $@
 
 -include $(DEPS)
@@ -58,45 +63,45 @@ $(BIN): $(INCLUDES) $(OBJECTS)
 .PRECIOUS: $(BUILD_DIR)/%.vert.spv $(BUILD_DIR)/%.frag.spv
 
 $(BUILD_DIR)/%.vert.spv: %.vert | $(BUILD_DIR)
-	@echo "CC    $<"
+	$(if $(NQ), @$(NQ) && echo "CC    $<")
 	$(Q) $(GLSLC) $< -o $@
 $(BUILD_DIR)/%.frag.spv: %.frag | $(BUILD_DIR)
-	@echo "CC    $<"
+	$(if $(NQ), @$(NQ) && echo "CC    $<")
 	$(Q) $(GLSLC) $< -o $@
 
 ./include/%.str: % | ./include
-	@echo "STR   $<"
+	$(if $(NQ), @$(NQ) && echo "STR   $<")
 	$(Q) sed 's/\\/\v/g;s/"/\\"/g;s/\t/\\t/g;s/\v/\\\\/g;s/\(.*\)/"\1\\n"/' < $< > $@
 ./include/%.bytes: % | ./include
-	@echo "BYTES $<"
+	$(if $(NQ), @$(NQ) && echo "BYTES $<")
 	$(Q) xxd -i $< | head -n-2 | tail -n+2 > $@
 ./include/%.bytes: $(BUILD_DIR)/% | ./include
-	@echo "BYTES $<"
+	$(if $(NQ), @$(NQ) && echo "BYTES $<")
 	$(Q) xxd -i $< | head -n-2 | tail -n+2 > $@
 
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
-	@echo "CC    $<"
+	$(if $(NQ), @$(NQ) && echo "CC    $<")
 	$(Q) $(CC) -MMD $(CFLAGS) -c $< -o $@
 $(BUILD_DIR)/%.s: %.c $(BUILD_DIR)/%.o
-	@echo "ASM   $<"
+	$(if $(NQ), @$(NQ) && echo "ASM   $<")
 	$(Q) $(CC) $(CFLAGS) -S $< -o $@
 $(BUILD_DIR)/%.c: %.c $(BUILD_DIR)/%.o
-	@echo "CPP   $<"
+	$(if $(NQ), @$(NQ) && echo "CPP   $<")
 	$(Q) $(CC) $(CFLAGS) -E $< | grep -v "^#" | clang-format > $@
 
 .PRECIOUS: $(BUILD_DIR)
 $(BUILD_DIR):
-	@echo "MKDIR $@"
+	$(if $(NQ), @$(NQ) && echo "MKDIR $@")
 	$(Q) mkdir -p $(BUILD_DIR)
 
 .PRECIOUS: ./include
 ./include:
-	@echo "MKDIR $@"
+	$(if $(NQ), @$(NQ) && echo "MKDIR $@")
 	$(Q) mkdir -p ./include
 
 .PHONY: clean
 clean:
-	@echo "CLEAN"
+	$(if $(NQ), @$(NQ) && echo "CLEAN")
 	$(Q) rm -fr $(BUILD_DIR)
 	$(Q) rm -fr ./include
 	$(Q) rm -fr $(BIN)

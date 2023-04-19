@@ -3,12 +3,13 @@
 // be used in user code)
 //  (contained type, vector type, qualifier)
 #define VECTOR_IMPL_LIST \
-    (const char *, ConstStringVec, const_string), (VkImage, VkImageVec, vk_image), \
-        (VkExtensionProperties, VkExtensionPropertiesVec, vk_extension_properties), \
-        (VkLayerProperties, VkLayerPropertiesVec, vk_layer_properties), \
-        (VkPhysicalDevice, VkPhysicalDeviceVec, vk_physical_device)
+    (const char *, ConstStringVec, const_string), (VkImage, VkImageVec, vk_image), (VkImageView, VkImageViewVec, vk_image_view), \
+        (VkFramebuffer, VkFramebufferVec, vk_framebuffer), (VkLayerProperties, VkLayerPropertiesVec, vk_layer_properties), \
+        (VkPhysicalDevice, VkPhysicalDeviceVec, vk_physical_device), \
+        (VkExtensionProperties, VkExtensionPropertiesVec, vk_extension_properties)
 #include "assert.h"
 #include "log.h"
+#include "macro_utils.h"
 #include "proxies.h"
 #include "vk_enum_string_helper.h"
 
@@ -89,6 +90,16 @@ typedef struct {
     SwapChainConfig config;
     VkSwapchainKHR swapchain;
     VkImageVec images;
+    VkImageViewVec image_views;
+    VkFramebufferVec framebuffers;
+    VkRenderPass render_pass;
+    VkPipelineLayout pipeline_layout;
+    VkPipeline graphics_pipeline;
+    VkCommandPool command_pool;
+    VkCommandBuffer command_buffer;
+    VkSemaphore image_available_semaphore;
+    VkSemaphore render_finished_semaphore;
+    VkFence in_flight_fence;
 
     VkQueue graphics_queue;
     VkQueue present_queue;
@@ -640,6 +651,78 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         vk_get_vec(&res.images, vkGetSwapchainImagesKHR(res.device, res.swapchain, count, ptr));
     }
 
+    // Image views
+    {
+        res.image_views = (VkImageViewVec)vec_init();
+        vec_grow(&res.image_views, res.images.len);
+        for (size_t i = 0; i < res.images.len; i++) {
+            VkImageViewCreateInfo create_info = {0};
+            create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            create_info.image = res.images.data[i];
+            create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            create_info.format = res.config.format.format;
+            create_info.components = (VkComponentMapping){
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            };
+            create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            create_info.subresourceRange.baseMipLevel = 0;
+            create_info.subresourceRange.levelCount = 1;
+            create_info.subresourceRange.baseArrayLayer = 0;
+            create_info.subresourceRange.layerCount = 1;
+
+            vk_try(
+                vkCreateImageView(res.device, &create_info, NULL, &res.image_views.data[i]),
+                "Failed to create image view #%u",
+                i
+            );
+        }
+        res.image_views.len = res.images.len;
+    }
+
+    // Render Pass
+    {
+        VkAttachmentDescription color_attachment = {0};
+        color_attachment.format = res.config.format.format;
+        color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        color_attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference color_attachment_reference = {0};
+        color_attachment_reference.attachment = 0;
+        color_attachment_reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass = {0};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_attachment_reference;
+
+        VkSubpassDependency dependency = {0};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo create_info = {0};
+        create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        create_info.attachmentCount = 1;
+        create_info.pAttachments = &color_attachment;
+        create_info.subpassCount = 1;
+        create_info.pSubpasses = &subpass;
+        create_info.dependencyCount = 1;
+        create_info.pDependencies = &dependency;
+
+        vk_try(vkCreateRenderPass(res.device, &create_info, NULL, &res.render_pass), "Failed to create render pass");
+    }
+
     // Graphic pipeline
     {
         VkShaderModule vertex_shader;
@@ -650,7 +733,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
             "Failed to create vertex shader module"
         );
         vk_try(
-            create_shader_module(res.device, (const uint32_t *)FRAGMENT_SHADER, FRAGMENT_SHADER_LEN, &vertex_shader),
+            create_shader_module(res.device, (const uint32_t *)FRAGMENT_SHADER, FRAGMENT_SHADER_LEN, &fragment_shader),
             "Failed to create fragment shader module"
         );
 
@@ -668,8 +751,177 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
 
         VkPipelineShaderStageCreateInfo shader_stages[2] = {vertex_shader_stage_create_info, fragment_shader_stage_create_info};
 
+        VkPipelineVertexInputStateCreateInfo vertex_input_state = {0};
+        vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertex_input_state.vertexBindingDescriptionCount = 0;
+        vertex_input_state.vertexAttributeDescriptionCount = 0;
+
+        VkPipelineInputAssemblyStateCreateInfo input_assembly = {0};
+        input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        input_assembly.primitiveRestartEnable = VK_FALSE;
+
+        static const VkDynamicState DYNAMIC_STATES[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+        };
+        static const uint32_t DYNAMIC_STATES_COUNT = sizeof(DYNAMIC_STATES) / sizeof(VkDynamicState);
+
+        VkPipelineDynamicStateCreateInfo dynamic_state = {0};
+        dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamic_state.dynamicStateCount = DYNAMIC_STATES_COUNT;
+        dynamic_state.pDynamicStates = DYNAMIC_STATES;
+
+        VkPipelineViewportStateCreateInfo viewport_state = {0};
+        viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport_state.scissorCount = 1;
+        viewport_state.viewportCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer_state = {0};
+        rasterizer_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer_state.depthClampEnable = VK_FALSE;
+        rasterizer_state.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer_state.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer_state.lineWidth = 1.0f;
+        rasterizer_state.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer_state.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer_state.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisample_state = {0};
+        multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisample_state.sampleShadingEnable = VK_FALSE;
+        multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisample_state.minSampleShading = 1.0f;
+        multisample_state.pSampleMask = NULL;
+        multisample_state.alphaToCoverageEnable = VK_FALSE;
+        multisample_state.alphaToOneEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState color_blend_attachment_state = {0};
+        color_blend_attachment_state.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        color_blend_attachment_state.blendEnable = VK_TRUE;
+        color_blend_attachment_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        color_blend_attachment_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        color_blend_attachment_state.colorBlendOp = VK_BLEND_OP_ADD;
+        color_blend_attachment_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        color_blend_attachment_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        color_blend_attachment_state.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo color_blend_state = {0};
+        color_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        color_blend_state.logicOpEnable = VK_FALSE;
+        color_blend_state.logicOp = VK_LOGIC_OP_COPY;
+        color_blend_state.attachmentCount = 1;
+        color_blend_state.pAttachments = &color_blend_attachment_state;
+        color_blend_state.blendConstants[0] = 0.0f;
+        color_blend_state.blendConstants[1] = 0.0f;
+        color_blend_state.blendConstants[2] = 0.0f;
+        color_blend_state.blendConstants[3] = 0.0f;
+
+        VkPipelineLayoutCreateInfo pipeline_layout_create_info = {0};
+        pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipeline_layout_create_info.setLayoutCount = 0;
+        pipeline_layout_create_info.pSetLayouts = NULL;
+        pipeline_layout_create_info.pushConstantRangeCount = 0;
+        pipeline_layout_create_info.pPushConstantRanges = NULL;
+
+        vk_try(
+            vkCreatePipelineLayout(res.device, &pipeline_layout_create_info, NULL, &res.pipeline_layout),
+            "Failed to create pipeline layout"
+        );
+
+        VkGraphicsPipelineCreateInfo create_info = {0};
+        create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        create_info.stageCount = 2;
+        create_info.pStages = shader_stages;
+        create_info.pVertexInputState = &vertex_input_state;
+        create_info.pInputAssemblyState = &input_assembly;
+        create_info.pViewportState = &viewport_state;
+        create_info.pRasterizationState = &rasterizer_state;
+        create_info.pMultisampleState = &multisample_state;
+        create_info.pDepthStencilState = NULL;
+        create_info.pColorBlendState = &color_blend_state;
+        create_info.pDynamicState = &dynamic_state;
+        create_info.layout = res.pipeline_layout;
+        create_info.renderPass = res.render_pass;
+        create_info.subpass = 0;
+        create_info.basePipelineHandle = VK_NULL_HANDLE;
+        create_info.basePipelineIndex = -1;
+
+        vk_try(
+            vkCreateGraphicsPipelines(res.device, VK_NULL_HANDLE, 1, &create_info, NULL, &res.graphics_pipeline),
+            "Failed to create graphics pipeline"
+        );
+
         vkDestroyShaderModule(res.device, fragment_shader, NULL);
         vkDestroyShaderModule(res.device, vertex_shader, NULL);
+    }
+
+    // Framebuffers
+    {
+        res.framebuffers = (VkFramebufferVec)vec_init();
+        vec_grow(&res.framebuffers, res.images.len);
+
+        for (size_t i = 0; i < res.image_views.len; i++) {
+            VkImageView attachments[] = {res.image_views.data[i]};
+
+            VkFramebufferCreateInfo create_info = {0};
+            create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            create_info.renderPass = res.render_pass;
+            create_info.attachmentCount = 1;
+            create_info.pAttachments = attachments;
+            create_info.width = res.config.extent.width;
+            create_info.height = res.config.extent.height;
+            create_info.layers = 1;
+
+            vk_try(
+                vkCreateFramebuffer(res.device, &create_info, NULL, &res.framebuffers.data[i]),
+                "Failed to create framebuffer"
+            );
+        }
+
+        res.framebuffers.len = res.image_views.len;
+    }
+
+    // Command pool
+    {
+        VkCommandPoolCreateInfo create_info = {0};
+        create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        create_info.queueFamilyIndex = res.queue_family_indices.graphics;
+        create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+        vk_try(vkCreateCommandPool(res.device, &create_info, NULL, &res.command_pool), "Failed to create command pool");
+    }
+
+    // Command buffer
+    {
+        VkCommandBufferAllocateInfo alloc_info = {0};
+        alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.commandPool = res.command_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+
+        vk_try(vkAllocateCommandBuffers(res.device, &alloc_info, &res.command_buffer), "Failed to allocate command buffer");
+    }
+
+    // Synchronisation
+    {
+        VkSemaphoreCreateInfo semaphore_create_info = {0};
+        semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fence_create_info = {0};
+        fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        vk_try(
+            vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.image_available_semaphore),
+            "Failed to create semaphore"
+        );
+        vk_try(
+            vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.render_finished_semaphore),
+            "Failed to create semaphore"
+        );
+        vk_try(vkCreateFence(res.device, &fence_create_info, NULL, &res.in_flight_fence), "Failed to create fence");
     }
 
     vec_drop(required_exts);
@@ -678,14 +930,107 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     return res;
 }
 
+void ctx_record_command_buffer(GraphicContext *ctx, uint32_t image_index) {
+    VkCommandBufferBeginInfo begin_info = {0};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+    vk_try(vkBeginCommandBuffer(ctx->command_buffer, &begin_info), "Failed to begin command buffer");
+
+    VkClearValue clear_color = (VkClearValue){{{0.0f, 0.0f, 0.0f, 1.0f}}};
+
+    VkRenderPassBeginInfo render_pass_info = {0};
+    render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    render_pass_info.renderPass = ctx->render_pass;
+    render_pass_info.framebuffer = vec_get(&ctx->framebuffers, image_index);
+    render_pass_info.renderArea.offset = (VkOffset2D){0, 0};
+    render_pass_info.renderArea.extent = ctx->config.extent;
+    render_pass_info.clearValueCount = 1;
+    render_pass_info.pClearValues = &clear_color;
+
+    VkViewport viewport = {0};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)ctx->config.extent.width;
+    viewport.height = (float)ctx->config.extent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor = {0};
+    scissor.offset = (VkOffset2D){0, 0};
+    scissor.extent = ctx->config.extent;
+
+    vkCmdBeginRenderPass(ctx->command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(ctx->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphics_pipeline);
+    vkCmdSetViewport(ctx->command_buffer, 0, 1, &viewport);
+    vkCmdSetScissor(ctx->command_buffer, 0, 1, &scissor);
+    vkCmdDraw(ctx->command_buffer, 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(ctx->command_buffer);
+
+    vk_try(vkEndCommandBuffer(ctx->command_buffer), "Failed to record command buffer");
+}
+
+void ctx_draw_frame(GraphicContext *ctx) {
+    vkWaitForFences(ctx->device, 1, &ctx->in_flight_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(ctx->device, 1, &ctx->in_flight_fence);
+
+    uint32_t image_index;
+    vkAcquireNextImageKHR(ctx->device, ctx->swapchain, UINT64_MAX, ctx->image_available_semaphore, VK_NULL_HANDLE, &image_index);
+    vkResetCommandBuffer(ctx->command_buffer, 0);
+    ctx_record_command_buffer(ctx, image_index);
+
+    VkSubmitInfo submit_info = {0};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    VkSemaphore semaphores[] = {ctx->image_available_semaphore};
+    VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = semaphores;
+    submit_info.pWaitDstStageMask = wait_stages;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &ctx->command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &ctx->render_finished_semaphore;
+
+    vk_try(vkQueueSubmit(ctx->graphics_queue, 1, &submit_info, ctx->in_flight_fence), "Failed to submit draw command buffer");
+
+    VkPresentInfoKHR present_info = {0};
+    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = &ctx->render_finished_semaphore;
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &ctx->swapchain;
+    present_info.pImageIndices = &image_index;
+    present_info.pResults = NULL;
+
+    vkQueuePresentKHR(ctx->present_queue, &present_info);
+}
+
 void ctx_drop(GraphicContext ctx) {
+    vkDeviceWaitIdle(ctx.device);
+
+    vkDestroyFence(ctx.device, ctx.in_flight_fence, NULL);
+    vkDestroySemaphore(ctx.device, ctx.render_finished_semaphore, NULL);
+    vkDestroySemaphore(ctx.device, ctx.image_available_semaphore, NULL);
+    vkDestroyCommandPool(ctx.device, ctx.command_pool, NULL);
+    vec_foreach(&ctx.framebuffers, framebuffer, vkDestroyFramebuffer(ctx.device, framebuffer, NULL));
+    vkDestroyPipeline(ctx.device, ctx.graphics_pipeline, NULL);
+    vkDestroyPipelineLayout(ctx.device, ctx.pipeline_layout, NULL);
+    vkDestroyRenderPass(ctx.device, ctx.render_pass, NULL);
+    vec_foreach(&ctx.image_views, view, vkDestroyImageView(ctx.device, view, NULL););
     vkDestroySwapchainKHR(ctx.device, ctx.swapchain, NULL);
-    swapchain_support_details_drop(ctx.swapchain_support);
     vkDestroyDevice(ctx.device, NULL);
     vkDestroySurfaceKHR(ctx.instance, ctx.surface, NULL);
     DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.debug_messenger, NULL);
     vkDestroyInstance(ctx.instance, NULL);
+
+    swapchain_support_details_drop(ctx.swapchain_support);
     vec_drop(ctx.images);
+    vec_drop(ctx.image_views);
+    vec_drop(ctx.framebuffers);
+
+    log_info("Context destroyed");
 }
 
 Window window_init(const char *title, uint32_t width, uint32_t height) {
@@ -707,9 +1052,10 @@ Window window_init(const char *title, uint32_t width, uint32_t height) {
     return res;
 }
 
-void window_run(Window win) {
+void window_run(Window win, GraphicContext *ctx) {
     while (!glfwWindowShouldClose(win.win)) {
         glfwPollEvents();
+        ctx_draw_frame(ctx);
     }
 }
 
@@ -727,10 +1073,8 @@ int main() {
     Window win = window_init("Window!", 800, 600);
     GraphicContext ctx = ctx_init("vulkan_app", &win);
 
-    // window_run(win);
+    window_run(win, &ctx);
 
     ctx_drop(ctx);
     window_drop(win);
-
-    log_info("VERT: \n%s", VERT);
 }

@@ -129,6 +129,13 @@
 #define vec_clear(vec) _VECTOR_GENERIC(*(vec), clear)(vec)
 #define vec_get(vec, index) _VECTOR_GENERIC(*(vec), get)(vec, index)
 #define vec_get_opt(vec, index, val) _VECTOR_GENERIC(*(vec), get_opt)(vec, index, val)
+#define vec_foreach(vec, var, expr) \
+    do { \
+        for(size_t _i = 0; _i < (vec)->len; _i++) { \
+            typeof(*(vec)->data) var = (vec)->data[_i]; \
+            expr; \
+        } \
+    } while(false)
 
 struct _VectorNever { void * _; };
 
