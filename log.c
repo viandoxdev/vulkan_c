@@ -10,7 +10,7 @@
 
 #define BASE_BUFFER_SIZE 1024
 #define SOURCE_BUFFER_SIZE 128
-static char BASE_BUFFER[BASE_BUFFER_SIZE]     = {0};
+static char BASE_BUFFER[BASE_BUFFER_SIZE] = {0};
 static char SOURCE_BUFFER[SOURCE_BUFFER_SIZE] = {0};
 
 // TODO: mutex
@@ -42,7 +42,7 @@ void _log_severity(LogSeverity sev, const char *func, const char *file, const in
 
     // format source in second half of buffer
     int source_len;
-    if(line >= 0) {
+    if (line >= 0) {
         source_len = snprintf(SOURCE_BUFFER, SOURCE_BUFFER_SIZE, "(%s:%d)", file, line);
     } else {
         source_len = snprintf(SOURCE_BUFFER, SOURCE_BUFFER_SIZE, "(%s)", file);
@@ -84,16 +84,24 @@ void _log_severity(LogSeverity sev, const char *func, const char *file, const in
     }
 
     // Final string buffer
-    char *buf        = BASE_BUFFER;
-    int   prefix_len = snprintf(buf, BASE_BUFFER_SIZE / 2, "\033[0;2m%-*s %s \033[0;1m%-*s \033[0;2m> ", LOGGER.source_width,
-                                SOURCE_BUFFER, sev_str, LOGGER.func_width, func);
+    char *buf = BASE_BUFFER;
+    int prefix_len = snprintf(
+        buf,
+        BASE_BUFFER_SIZE / 2,
+        "\033[0;2m%-*s %s \033[0;1m%-*s \033[0;2m> ",
+        LOGGER.source_width,
+        SOURCE_BUFFER,
+        sev_str,
+        LOGGER.func_width,
+        func
+    );
 
-    const char * suffix = "\033[0m\n";
+    const char *suffix = "\033[0m\n";
     const int suffix_len = 5;
 
     // max slice of the buffer used by the message
-    char *str      = buf + prefix_len;
-    int   str_size = BASE_BUFFER_SIZE - prefix_len - suffix_len; // -1 for the trailing newline
+    char *str = buf + prefix_len;
+    int str_size = BASE_BUFFER_SIZE - prefix_len - suffix_len; // -1 for the trailing newline
 
     va_list args;
     va_start(args, fmt);

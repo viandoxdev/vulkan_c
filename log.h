@@ -10,20 +10,20 @@ typedef uint32_t LogSeverities;
 
 // The logger
 typedef struct {
-    bool       initialized;
-    FILE      *fd;
+    bool initialized;
+    FILE *fd;
     LogSeverities sevs;
-    int        source_width;
-    int        func_width;
+    int source_width;
+    int func_width;
 } Logger;
 
 // A message's severity Error > Warning > Info > Debug > Trace
-typedef enum: LogSeverities {
-    Trace   = 1 << 0,
-    Debug   = 1 << 1,
-    Info    = 1 << 2,
+typedef enum : LogSeverities {
+    Trace = 1 << 0,
+    Debug = 1 << 1,
+    Info = 1 << 2,
     Warning = 1 << 3,
-    Error   = 1 << 4,
+    Error = 1 << 4,
 } LogSeverity;
 
 // Needs to be here but log_* macros should be used instead

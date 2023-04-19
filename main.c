@@ -5,8 +5,9 @@
 #define VECTOR_IMPL_LIST \
     (const char *, ConstStringVec, const_string), (VkImage, VkImageVec, vk_image), (VkImageView, VkImageViewVec, vk_image_view), \
         (VkFramebuffer, VkFramebufferVec, vk_framebuffer), (VkLayerProperties, VkLayerPropertiesVec, vk_layer_properties), \
-        (VkPhysicalDevice, VkPhysicalDeviceVec, vk_physical_device), \
-        (VkExtensionProperties, VkExtensionPropertiesVec, vk_extension_properties)
+        (VkPhysicalDevice, VkPhysicalDeviceVec, vk_physical_device), (VkCommandBuffer, VkCommandBufferVec, vk_command_buffer), \
+        (VkExtensionProperties, VkExtensionPropertiesVec, vk_extension_properties), (VkSemaphore, VkSemaphoreVec, vk_semaphore), \
+        (VkFence, VkFenceVec, vk_fence)
 #include "assert.h"
 #include "log.h"
 #include "macro_utils.h"
@@ -40,17 +41,15 @@
         uint32_t *count = &_count; \
         void *ptr = NULL; \
         expr; \
-        *(vec) = (typeof(*(vec)))vec_init(); \
         vec_grow(vec, _count); \
         ptr = (vec)->data; \
         expr; \
         (vec)->len = _count; \
     } while (false)
 
+#define CONCURENT_FRAMES 2
+
 // Structs
-typedef struct {
-    GLFWwindow *win;
-} Window;
 
 typedef struct {
     int64_t graphics;
@@ -96,14 +95,22 @@ typedef struct {
     VkPipelineLayout pipeline_layout;
     VkPipeline graphics_pipeline;
     VkCommandPool command_pool;
-    VkCommandBuffer command_buffer;
-    VkSemaphore image_available_semaphore;
-    VkSemaphore render_finished_semaphore;
-    VkFence in_flight_fence;
+    VkCommandBuffer command_buffers[CONCURENT_FRAMES];
+    VkSemaphore image_available_semaphores[CONCURENT_FRAMES];
+    VkSemaphore render_finished_semaphores[CONCURENT_FRAMES];
+    VkFence in_flight_fences[CONCURENT_FRAMES];
 
     VkQueue graphics_queue;
     VkQueue present_queue;
+
+    uint32_t current_frame;
+    bool framebuffer_resized;
 } GraphicContext;
+
+typedef struct {
+    GLFWwindow *win;
+    GraphicContext ctx;
+} Window;
 
 // Vulkan configuration constants
 
@@ -281,8 +288,12 @@ static inline SwapChainConfig configure_swapchain(SwapChainSupportDetails *detai
     if (details->capabilities.currentExtent.width != UINT32_MAX) {
         cfg.extent = details->capabilities.currentExtent;
     } else {
-        int w, h;
+        int w = 0, h = 0;
         glfwGetFramebufferSize(win->win, &w, &h);
+        while (w == 0 || h == 0) {
+            glfwGetFramebufferSize(win->win, &w, &h);
+            glfwWaitEvents();
+        }
 
         VkSurfaceCapabilitiesKHR *cap = &details->capabilities;
 
@@ -291,7 +302,7 @@ static inline SwapChainConfig configure_swapchain(SwapChainSupportDetails *detai
                                                            : w;
         cfg.extent.height = h < cap->minImageExtent.height   ? cap->minImageExtent.height
                             : h > cap->maxImageExtent.height ? cap->maxImageExtent.height
-                                                             : w;
+                                                             : h;
     }
 
     // Image count
@@ -347,8 +358,121 @@ static inline VkResult create_swapchain(
     return vkCreateSwapchainKHR(dev, &create_info, NULL, new);
 }
 
+// Create the images views of the context, assumes ctx->image_views is initialized.
+// Needs: images, config, device
+// Note: overrides previous views
+void _ctx_create_image_views(GraphicContext *ctx) {
+    vec_grow(&ctx->image_views, ctx->images.len);
+    for (size_t i = 0; i < ctx->images.len; i++) {
+        VkImageViewCreateInfo create_info = {0};
+        create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        create_info.image = ctx->images.data[i];
+        create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        create_info.format = ctx->config.format.format;
+        create_info.components = (VkComponentMapping){
+            .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+        };
+        create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        create_info.subresourceRange.baseMipLevel = 0;
+        create_info.subresourceRange.levelCount = 1;
+        create_info.subresourceRange.baseArrayLayer = 0;
+        create_info.subresourceRange.layerCount = 1;
+
+        vk_try(
+            vkCreateImageView(ctx->device, &create_info, NULL, &ctx->image_views.data[i]),
+            "Failed to create image view #%u",
+            i
+        );
+    }
+    ctx->image_views.len = ctx->images.len;
+}
+
+// Create the framebuffers of the context, assumes ctx->framebuffers is initialized.
+// Needs: image_views, render_pass, config, device
+// Note: overrides previous framebuffers
+void _ctx_create_framebuffers(GraphicContext *ctx) {
+    vec_grow(&ctx->framebuffers, ctx->image_views.len);
+
+    for (size_t i = 0; i < ctx->image_views.len; i++) {
+        VkImageView attachments[] = {ctx->image_views.data[i]};
+
+        VkFramebufferCreateInfo create_info = {0};
+        create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        create_info.renderPass = ctx->render_pass;
+        create_info.attachmentCount = 1;
+        create_info.pAttachments = attachments;
+        create_info.width = ctx->config.extent.width;
+        create_info.height = ctx->config.extent.height;
+        create_info.layers = 1;
+
+        vk_try(vkCreateFramebuffer(ctx->device, &create_info, NULL, &ctx->framebuffers.data[i]), "Failed to create framebuffer");
+    }
+
+    ctx->framebuffers.len = ctx->image_views.len;
+}
+
+void _ctx_recreate_swapchain(GraphicContext *ctx, Window *win) {
+
+    VkSwapchainKHR old_swapchain = ctx->swapchain;
+    VkImageViewVec old_image_views = ctx->image_views;
+    VkFramebufferVec old_framebuffers = ctx->framebuffers;
+    SwapChainConfig old_config = ctx->config;
+
+    ctx->config = configure_swapchain(&ctx->swapchain_support, win);
+    ctx->image_views = (VkImageViewVec)vec_init();
+    ctx->framebuffers = (VkFramebufferVec)vec_init();
+
+    vk_try(
+        create_swapchain(ctx->device, &ctx->config, ctx->surface, &ctx->queue_family_indices, old_swapchain, &ctx->swapchain),
+        "Failed to create swapchain"
+    );
+
+    vk_get_vec(&ctx->images, vkGetSwapchainImagesKHR(ctx->device, ctx->swapchain, count, ptr));
+
+    _ctx_create_image_views(ctx);
+    _ctx_create_framebuffers(ctx);
+
+    vkDeviceWaitIdle(ctx->device);
+
+    vec_foreach(&old_framebuffers, fb, vkDestroyFramebuffer(ctx->device, fb, NULL));
+    vec_foreach(&old_image_views, view, vkDestroyImageView(ctx->device, view, NULL));
+    vkDestroySwapchainKHR(ctx->device, old_swapchain, NULL);
+
+    vec_drop(old_framebuffers);
+    vec_drop(old_image_views);
+
+#ifndef LOG_DISABLE
+    {
+        SwapChainConfig old = old_config;
+        SwapChainConfig new = ctx->config;
+        log_debug("Recreated swapchain");
+
+#define CMP_LOG(acc, name, fmt, func) \
+    do { \
+        if (old acc != new acc) \
+            log_debug("    " name ": " fmt " -> " fmt, func(old acc), func(new acc)); \
+    } while (false)
+        CMP_LOG(.extent.width, "width", "%d", );
+        CMP_LOG(.extent.height, "height", "%d", );
+        CMP_LOG(.composite_alpha, "composite_alpha", "%s", string_VkBool32);
+        CMP_LOG(.format.format, "format", "%s", string_VkFormat);
+        CMP_LOG(.format.colorSpace, "color space", "%s", string_VkColorSpaceKHR);
+        CMP_LOG(.present_mode, "present mode", "%s", string_VkPresentModeKHR);
+        CMP_LOG(.transform, "transform", "%s", string_VkSurfaceTransformFlagBitsKHR);
+        CMP_LOG(.image_count, "image count", "%d", );
+#undef CMP_LOG
+    }
+#endif
+}
+
 GraphicContext ctx_init(const char *app_name, Window *win) {
     GraphicContext res = {0};
+
+    res.current_frame = 0;
+    res.framebuffer_resized = false;
 
     ConstStringVec required_exts = vec_init();
     ConstStringVec enabled_layers = vec_init();
@@ -367,7 +491,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     // Validation layers
 #ifdef ENABLE_VALIDATION_LAYERS
     {
-        VkLayerPropertiesVec supported_layers;
+        VkLayerPropertiesVec supported_layers = vec_init();
         vk_get_vec(&supported_layers, vkEnumerateInstanceLayerProperties(count, ptr));
 
         vec_grow(&enabled_layers, supported_layers.len);
@@ -406,7 +530,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         // Log the supported ext ensions
 #ifndef LOG_DISABLE
         {
-            VkExtensionPropertiesVec supported_exts;
+            VkExtensionPropertiesVec supported_exts = vec_init();
             vk_get_vec(&supported_exts, vkEnumerateInstanceExtensionProperties(NULL, count, ptr));
 
             log_info("Availables vulkan extensions:");
@@ -462,7 +586,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     {
         res.physical_device = VK_NULL_HANDLE;
 
-        VkPhysicalDeviceVec devices;
+        VkPhysicalDeviceVec devices = vec_init();
         vk_get_vec(&devices, vkEnumeratePhysicalDevices(res.instance, count, ptr));
 
         if (devices.len == 0) {
@@ -494,7 +618,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
             VkPhysicalDeviceProperties props;
             VkPhysicalDeviceFeatures feats;
             QueueFamilyIndices idx;
-            VkExtensionPropertiesVec device_extensions;
+            VkExtensionPropertiesVec device_extensions = vec_init();
 
             idx = queue_family_indices_init(dev, res.surface);
             vkGetPhysicalDeviceProperties(dev, &props);
@@ -648,38 +772,14 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
             "Failed to create swapchain"
         );
 
+        res.images = (VkImageVec)vec_init();
         vk_get_vec(&res.images, vkGetSwapchainImagesKHR(res.device, res.swapchain, count, ptr));
     }
 
     // Image views
     {
         res.image_views = (VkImageViewVec)vec_init();
-        vec_grow(&res.image_views, res.images.len);
-        for (size_t i = 0; i < res.images.len; i++) {
-            VkImageViewCreateInfo create_info = {0};
-            create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            create_info.image = res.images.data[i];
-            create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            create_info.format = res.config.format.format;
-            create_info.components = (VkComponentMapping){
-                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
-            };
-            create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            create_info.subresourceRange.baseMipLevel = 0;
-            create_info.subresourceRange.levelCount = 1;
-            create_info.subresourceRange.baseArrayLayer = 0;
-            create_info.subresourceRange.layerCount = 1;
-
-            vk_try(
-                vkCreateImageView(res.device, &create_info, NULL, &res.image_views.data[i]),
-                "Failed to create image view #%u",
-                i
-            );
-        }
-        res.image_views.len = res.images.len;
+        _ctx_create_image_views(&res);
     }
 
     // Render Pass
@@ -860,27 +960,7 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     // Framebuffers
     {
         res.framebuffers = (VkFramebufferVec)vec_init();
-        vec_grow(&res.framebuffers, res.images.len);
-
-        for (size_t i = 0; i < res.image_views.len; i++) {
-            VkImageView attachments[] = {res.image_views.data[i]};
-
-            VkFramebufferCreateInfo create_info = {0};
-            create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            create_info.renderPass = res.render_pass;
-            create_info.attachmentCount = 1;
-            create_info.pAttachments = attachments;
-            create_info.width = res.config.extent.width;
-            create_info.height = res.config.extent.height;
-            create_info.layers = 1;
-
-            vk_try(
-                vkCreateFramebuffer(res.device, &create_info, NULL, &res.framebuffers.data[i]),
-                "Failed to create framebuffer"
-            );
-        }
-
-        res.framebuffers.len = res.image_views.len;
+        _ctx_create_framebuffers(&res);
     }
 
     // Command pool
@@ -899,9 +979,9 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         alloc_info.commandPool = res.command_pool;
         alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_info.commandBufferCount = 1;
+        alloc_info.commandBufferCount = CONCURENT_FRAMES;
 
-        vk_try(vkAllocateCommandBuffers(res.device, &alloc_info, &res.command_buffer), "Failed to allocate command buffer");
+        vk_try(vkAllocateCommandBuffers(res.device, &alloc_info, res.command_buffers), "Failed to allocate command buffer");
     }
 
     // Synchronisation
@@ -913,15 +993,17 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
         fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fence_create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        vk_try(
-            vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.image_available_semaphore),
-            "Failed to create semaphore"
-        );
-        vk_try(
-            vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.render_finished_semaphore),
-            "Failed to create semaphore"
-        );
-        vk_try(vkCreateFence(res.device, &fence_create_info, NULL, &res.in_flight_fence), "Failed to create fence");
+        for (size_t i = 0; i < CONCURENT_FRAMES; i++) {
+            vk_try(
+                vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.image_available_semaphores[i]),
+                "Failed to create semaphore"
+            );
+            vk_try(
+                vkCreateSemaphore(res.device, &semaphore_create_info, NULL, &res.render_finished_semaphores[i]),
+                "Failed to create semaphore"
+            );
+            vk_try(vkCreateFence(res.device, &fence_create_info, NULL, &res.in_flight_fences[i]), "Failed to create fence");
+        }
     }
 
     vec_drop(required_exts);
@@ -930,11 +1012,13 @@ GraphicContext ctx_init(const char *app_name, Window *win) {
     return res;
 }
 
-void ctx_record_command_buffer(GraphicContext *ctx, uint32_t image_index) {
+void ctx_set_resized(GraphicContext *ctx) { ctx->framebuffer_resized = true; }
+
+void ctx_record_command_buffer(GraphicContext *ctx, VkCommandBuffer buffer, uint32_t image_index) {
     VkCommandBufferBeginInfo begin_info = {0};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
-    vk_try(vkBeginCommandBuffer(ctx->command_buffer, &begin_info), "Failed to begin command buffer");
+    vk_try(vkBeginCommandBuffer(buffer, &begin_info), "Failed to begin command buffer");
 
     VkClearValue clear_color = (VkClearValue){{{0.0f, 0.0f, 0.0f, 1.0f}}};
 
@@ -959,60 +1043,89 @@ void ctx_record_command_buffer(GraphicContext *ctx, uint32_t image_index) {
     scissor.offset = (VkOffset2D){0, 0};
     scissor.extent = ctx->config.extent;
 
-    vkCmdBeginRenderPass(ctx->command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdBindPipeline(ctx->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphics_pipeline);
-    vkCmdSetViewport(ctx->command_buffer, 0, 1, &viewport);
-    vkCmdSetScissor(ctx->command_buffer, 0, 1, &scissor);
-    vkCmdDraw(ctx->command_buffer, 3, 1, 0, 0);
+    vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->graphics_pipeline);
+    vkCmdSetViewport(buffer, 0, 1, &viewport);
+    vkCmdSetScissor(buffer, 0, 1, &scissor);
+    vkCmdDraw(buffer, 3, 1, 0, 0);
 
-    vkCmdEndRenderPass(ctx->command_buffer);
+    vkCmdEndRenderPass(buffer);
 
-    vk_try(vkEndCommandBuffer(ctx->command_buffer), "Failed to record command buffer");
+    vk_try(vkEndCommandBuffer(buffer), "Failed to record command buffer");
 }
 
-void ctx_draw_frame(GraphicContext *ctx) {
-    vkWaitForFences(ctx->device, 1, &ctx->in_flight_fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(ctx->device, 1, &ctx->in_flight_fence);
+void ctx_draw_frame(GraphicContext *ctx, Window *win) {
+    VkResult result;
+
+    VkSemaphore image_available_semaphore = ctx->image_available_semaphores[ctx->current_frame];
+    VkSemaphore render_finished_semaphore = ctx->render_finished_semaphores[ctx->current_frame];
+    VkFence in_flight_fence = ctx->in_flight_fences[ctx->current_frame];
+    VkCommandBuffer command_buffer = ctx->command_buffers[ctx->current_frame];
+
+    vkWaitForFences(ctx->device, 1, &in_flight_fence, VK_TRUE, UINT64_MAX);
 
     uint32_t image_index;
-    vkAcquireNextImageKHR(ctx->device, ctx->swapchain, UINT64_MAX, ctx->image_available_semaphore, VK_NULL_HANDLE, &image_index);
-    vkResetCommandBuffer(ctx->command_buffer, 0);
-    ctx_record_command_buffer(ctx, image_index);
+
+    result =
+        vkAcquireNextImageKHR(ctx->device, ctx->swapchain, UINT64_MAX, image_available_semaphore, VK_NULL_HANDLE, &image_index);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        _ctx_recreate_swapchain(ctx, win);
+        return;
+    } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        log_error("Failed to acquire swap chain image");
+        exit(1);
+    }
+
+    vkResetFences(ctx->device, 1, &in_flight_fence);
+
+    vkResetCommandBuffer(command_buffer, 0);
+    ctx_record_command_buffer(ctx, ctx->command_buffers[ctx->current_frame], image_index);
 
     VkSubmitInfo submit_info = {0};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-    VkSemaphore semaphores[] = {ctx->image_available_semaphore};
+    VkSemaphore semaphores[] = {image_available_semaphore};
     VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     submit_info.waitSemaphoreCount = 1;
     submit_info.pWaitSemaphores = semaphores;
     submit_info.pWaitDstStageMask = wait_stages;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &ctx->command_buffer;
+    submit_info.pCommandBuffers = &command_buffer;
     submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &ctx->render_finished_semaphore;
+    submit_info.pSignalSemaphores = &render_finished_semaphore;
 
-    vk_try(vkQueueSubmit(ctx->graphics_queue, 1, &submit_info, ctx->in_flight_fence), "Failed to submit draw command buffer");
+    vk_try(vkQueueSubmit(ctx->graphics_queue, 1, &submit_info, in_flight_fence), "Failed to submit draw command buffer");
 
     VkPresentInfoKHR present_info = {0};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &ctx->render_finished_semaphore;
+    present_info.pWaitSemaphores = &render_finished_semaphore;
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &ctx->swapchain;
     present_info.pImageIndices = &image_index;
     present_info.pResults = NULL;
 
-    vkQueuePresentKHR(ctx->present_queue, &present_info);
+    result = vkQueuePresentKHR(ctx->present_queue, &present_info);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || ctx->framebuffer_resized) {
+        ctx->framebuffer_resized = false;
+        _ctx_recreate_swapchain(ctx, win);
+    } else if (result != VK_SUCCESS) {
+        log_error("Failed to present swapchain image");
+        exit(1);
+    }
+
+    ctx->current_frame = (ctx->current_frame + 1) % CONCURENT_FRAMES;
 }
 
 void ctx_drop(GraphicContext ctx) {
     vkDeviceWaitIdle(ctx.device);
 
-    vkDestroyFence(ctx.device, ctx.in_flight_fence, NULL);
-    vkDestroySemaphore(ctx.device, ctx.render_finished_semaphore, NULL);
-    vkDestroySemaphore(ctx.device, ctx.image_available_semaphore, NULL);
+    for (size_t i = 0; i < CONCURENT_FRAMES; i++) {
+        vkDestroyFence(ctx.device, ctx.in_flight_fences[i], NULL);
+        vkDestroySemaphore(ctx.device, ctx.render_finished_semaphores[i], NULL);
+        vkDestroySemaphore(ctx.device, ctx.image_available_semaphores[i], NULL);
+    }
     vkDestroyCommandPool(ctx.device, ctx.command_pool, NULL);
     vec_foreach(&ctx.framebuffers, framebuffer, vkDestroyFramebuffer(ctx.device, framebuffer, NULL));
     vkDestroyPipeline(ctx.device, ctx.graphics_pipeline, NULL);
@@ -1052,14 +1165,22 @@ Window window_init(const char *title, uint32_t width, uint32_t height) {
     return res;
 }
 
-void window_run(Window win, GraphicContext *ctx) {
-    while (!glfwWindowShouldClose(win.win)) {
+static void _window_framebuffer_resized_callback(GLFWwindow *window, int width, int height) {
+    Window *win = glfwGetWindowUserPointer(window);
+    ctx_set_resized(&win->ctx);
+}
+
+void window_run(Window *win) {
+    glfwSetWindowUserPointer(win->win, win);
+    glfwSetFramebufferSizeCallback(win->win, _window_framebuffer_resized_callback);
+    while (!glfwWindowShouldClose(win->win)) {
         glfwPollEvents();
-        ctx_draw_frame(ctx);
+        ctx_draw_frame(&win->ctx, win);
     }
 }
 
 void window_drop(Window win) {
+    ctx_drop(win.ctx);
     glfwDestroyWindow(win.win);
     glfwTerminate();
     log_info("Window destroyed");
@@ -1071,10 +1192,9 @@ int main() {
     logger_init();
 
     Window win = window_init("Window!", 800, 600);
-    GraphicContext ctx = ctx_init("vulkan_app", &win);
+    win.ctx = ctx_init("vulkan_app", &win);
 
-    window_run(win, &ctx);
+    window_run(&win);
 
-    ctx_drop(ctx);
     window_drop(win);
 }
